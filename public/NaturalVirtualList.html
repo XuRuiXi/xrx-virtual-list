@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Document</title>
+  <style>
+    .root{
+      width: 300px;
+      margin: 0 auto;
+      overflow-y: auto;
+      position: relative;
+    }
+    .item{
+      text-align: center;
+      border-bottom: 1px solid #ccc;
+      box-sizing: border-box;
+      position: absolute;
+      width: 100%;
+    }
+  </style>
+</head>
+<body>
+  <div class="root">
+    <div class="static"></div>
+    <div id="content"></div>
+  </div>
+  <script>
+    
+    const urlSearchParams = new URLSearchParams(window.location.search);
+    const data = JSON.parse(urlSearchParams.get('data'));
+    const total = data.length;
+    // 滚动容器高度
+    const SCROLL_CONTAINER_HRIGHT = 520;
+    // 每个子元素高度
+    const ITEM_HEIGHT = 50;
+    // 可视区域的子元素数量
+    const VIEW_NUMBER = Math.ceil(SCROLL_CONTAINER_HRIGHT / ITEM_HEIGHT);
+    // 过渡子元素数量（缓冲区）
+    const BUFFER_NUMBER = 10;
+
+    // 滚动容器
+    const scrollDom = document.querySelector('.root');
+    // 占位容器
+    const staticDom = document.querySelector('.static');
+    // 内容容器
+    const content = document.querySelector('#content');
+
+    let start = 0;
+    let end = start + VIEW_NUMBER + BUFFER_NUMBER;
+
+    scrollDom.style.height = `${SCROLL_CONTAINER_HRIGHT}px`;
+    staticDom.style.height = `${total * ITEM_HEIGHT}px`;
+
+    function render(startIndex, endIndex) {
+      const renderList = data.map((i, idx) => {
+        if (startIndex - BUFFER_NUMBER <= idx && endIndex > idx) {
+          return i;
+        }
+        return false;
+      });
+      let template = '';
+      for (let i = 0; i < renderList.length; i++) {
+        if (renderList[i]) {
+          let str = 
+          `<div
+            class="item"
+            style="height: ${ITEM_HEIGHT}px; top: ${ITEM_HEIGHT * i}px"
+          >
+            ${renderList[i].id}
+          </div>`;
+          template = template.concat(str);
+        }
+      }
+      content.innerHTML = template;
+    }
+    render(start, end);
+    scrollDom.addEventListener('scroll', e => {
+      const scrollTop = e.target.scrollTop;
+      start = Math.floor(scrollTop / ITEM_HEIGHT);
+      end = start + VIEW_NUMBER + BUFFER_NUMBER;
+      render(start, end);
+    });
+
+  </script>
+</body>
+</html>
