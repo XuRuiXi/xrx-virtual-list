@@ -24,4 +24,7 @@ module.exports = {
     "@typescript-eslint/no-var-requires": 0, // 以const module = require()不报错
     "react/prop-types": 0, // 关闭react props的propTypes类型校验
   },
+  globals: {
+    "JSX": "readonly"
+  }
 };

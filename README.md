@@ -4,7 +4,7 @@
 在我们滚动的过程中，只需要渲染可视区里面的元素即可。  
 
 - 实现一（基于positiond定位）  
-```js
+```html
 <div class="root" style="position: relative">
   <div class="static" />
   <Item style="position: absolute; top: 0px" />
@@ -118,7 +118,7 @@ const BUFFER_NUMBER = 10;
 当容器滚动时，监听滚动事件，通过scrollTop，得到被卷起的高度，从而知道被卷起的子元素数量是多少。然后就设置start值（列表渲染的起始坐标）。  
 然后end代表列表渲染的结束坐标，它包含起始坐标 + 可视区域元素数量 + 缓冲区元素数量。
 
-```js
+```jsx
 <div style={{ height: `${ITEM_HEIGHT * total}px` }} />
 ```
 这个div就是占位元素，它的高度取决于列表数量和元素高度。然后生成滚动列表。
@@ -147,7 +147,7 @@ start - BUFFER_NUMBER是因为顶部也需要缓冲区。
 综上可以看出，我们真实渲染的列表，其实是(start - BUFFER_NUMBER) ~ (start + VIEW_NUMBER + BUFFER_NUMBER)
 
 - 实现二（滚动容器上下采用空白的占位元素）  
-```js
+```html
 <div class="root">
   <div class="staticTop" />
   <Item />
@@ -349,3 +349,408 @@ const end = useMemo(() => Math.min(start + VIEW_NUMBER + BUFFER_NUMBER, total), 
 </body>
 </html>
 ```
+
+### 实现动态高度的虚拟列表（滚动到底部加载，类似刷微博的体验）  
+为了实现动态加载数据，我们需要用node启动一个后端服务。随机生成10万条数据，根据接口的PageNum和pageSize，返回相应的数据。
+
+```js
+const express = require('express');
+const bodyParser = require('body-parser');
+const app = express();
+
+const port = 1111;
+const LIST_SIZE = 100000;
+
+const list = Array(LIST_SIZE).fill(1).map((_, i) => {
+  const num = (Math.random() * 100).toFixed(0);
+  return {
+    content: Array(Number(num)).fill(i).join(''),
+  };
+});
+
+app.use(bodyParser.json());
+
+app.post('/getHi', (req, res) => {
+  console.log(req.body);
+  const { pageNum, pageSize = 10 } = req.body;
+  const _list = list.filter((i, idx) => idx >= (pageNum - 1) * pageSize && idx < pageNum * pageSize);
+  const response = {
+    list: _list,
+    total: list.length,
+  }
+  res.send(response);
+})
+
+const server = app.listen(port, () => {
+  console.log(`Example app listening at http://localhost:${port}`);
+});
+
+```
+
+首先dom结构和我们虚拟列表的position方法类似。子元素我们也是采用position定位。不同的是多了\<CountDom />和\<BottomDiv />。  
+
+\<CountDom />：为了获取dom的真实高度，接口获取到数据之后，我们把数据渲染到该区域，计算到真实高度之后，再把该区域的dom删除。  
+
+\<BottomDiv />：显示提示信息的，例如滚动到底部显示"加载中..."等等。
+
+```html
+<div class="root" style="position: relative">
+  <div class="static" />
+  <Item style="position: absolute; top: 0px" />
+  <Item style="position: absolute; top: 50px" />
+  <Item style="position: absolute; top: 10px" />
+  <CountDom />
+  <BottomDiv />
+</div>
+```
+
+**先讲下整体思路：**  
+
+维护一个数组：topList，表示每个子元素距离父元素的top值：通过接口获取到数据之后，渲染临时dom到\<CountDom />，获取dom的真实高度。然后通过计算得到top。在渲染的时候，元素和topList一一对应。
+
+
+先上整体代码，然后解析：  
+./DynamicHeightVirtual.less
+```less
+.root{
+  --bottomHeight: 50px;
+  :global{
+    .item{
+      visibility: hidden;
+      top: 0;
+    }
+  }
+
+  font-family: YouSheBiaoTiHei;
+  margin: 0 auto;
+  overflow-y: auto;
+  position: relative;
+  .item{
+    position: absolute;
+    width: 100%;
+    padding: 10px;
+    text-align: center;
+    word-break: break-all;
+    border-bottom: 1px solid #ddd;
+    text-align: center;
+    box-sizing: border-box;
+  }
+  .bottom{
+    height: var(--bottomHeight);
+    text-align: center;
+    line-height: var(--bottomHeight);
+  }
+}
+```
+./index.tsx
+```ts
+import React, { useEffect, useState, useMemo, useRef } from 'react';
+import axios from 'axios';
+import styles from './DynamicHeightVirtual.less';
+
+const PAGESIZE:number = 10;
+// 缓冲地带的dom数量
+const BUFFER_NUMBER:number = 10;
+// 容器高度
+const CONTAINER_HEIGHR:number = 500;
+
+type listType = Array<{
+  content: string;
+}>
+
+type BottomDivProps = React.HTMLAttributes<HTMLDivElement> & {
+  end: boolean;
+  list: listType;
+}
+
+type CountDomProps = React.HTMLAttributes<HTMLDivElement> & {
+  current: number;
+  list: listType;
+}
+
+const DynamicHeightVirtual = () => {
+  // 总的列表数据
+  const [list, setList] = useState<listType>([]);
+  const [current, setCurrent] = useState<number>(1);
+  const [loading, setLoading] = useState<boolean>(false);
+  const [total, setTotal] = useState<number>(0);
+  // 判断是否以及请求完所有数据
+  const end = useMemo(() => list.length === total, [list, total]);
+  // 滚动容器dom
+  const dom = useRef<HTMLDivElement>();
+  // 每个dom的position距离top的位置
+  const [topList, setTopList] = useState<Array<number>>([0]);
+  // 渲染起始位置
+  const [renderStart, setRenderStart] = useState(0);
+
+  const getPage = (num: number) => {
+    setLoading(true);
+    axios.post('/getHi', { pageNum: num, pageSize: PAGESIZE }).then(res => {
+      setList([...list, ...res.data.list]);
+      setTotal(res.data.total);
+      setLoading(false);
+      // 放在异步队列，获取更新之后的dom，然后计算的dom真实高度，维护一组高度的列表
+      setTimeout(() => {
+        const doms = [...dom.current.querySelectorAll('.item')] as Array<HTMLDivElement>;
+        const heights = doms.map(i => {
+          return i.offsetHeight;
+        });
+        
+        const newTopList = [...topList];
+        const topListLength = newTopList.length;
+        for (let i = 0; i < heights.length; i++) {
+          newTopList[topListLength + i] = newTopList[topListLength - 1 + i] + heights[i];
+        }
+        setTopList(newTopList);
+        doms.forEach(i => i.remove());
+      });
+    });
+  };
+  
+  const scroll: React.UIEventHandler<HTMLDivElement> = (e) => {
+    const scrollTop = e.currentTarget.scrollTop;
+    setRenderStart(topList.findIndex(i => i > scrollTop));
+    const bottomDis = e.currentTarget.scrollHeight - scrollTop - e.currentTarget.offsetHeight;
+    if (bottomDis < 50 && !loading && !end) {
+      setCurrent(current + 1);
+    }
+  };
+
+  const CountDom = useMemo(() => {
+    return function _(props: CountDomProps) {
+      const { current, list } = props;
+      const start = (current - 1) * PAGESIZE;
+      return (
+        <div>
+          {
+            list.map((i, idx) =>{
+              if (idx >= start) {
+                return (
+                  <div
+                    key={idx}
+                    className={`${styles.item} item`}
+                  >
+                    {i.content}
+                  </div>
+                );
+              }
+              return false;
+            })
+          }
+        </div>
+      );
+    };
+  }, [list, current]);
+
+  const BottomDiv = (props: BottomDivProps) => {
+    const { end } = props;
+    if (list.length === 0) return <div className={styles.bottom}>暂无数据</div>;
+    if (end) return <div className={styles.bottom}>到底啦~~~</div>;
+    return <div className={styles.bottom}>加载中...</div>;
+  };
+
+  useEffect(() => {
+    getPage(current);
+  }, [current]);
+  return (
+    <div
+      className={styles.root}
+      style={{ height: `${CONTAINER_HEIGHR}px` }}
+      onScroll={scroll}
+      ref={dom}
+    >
+      <div style={{ height: `${topList[topList.length - 1]}px` }} />
+      {
+        list.map((i, idx) => {
+          if (idx >= renderStart - BUFFER_NUMBER && idx < renderStart + 20) {
+            return (
+              <div
+                key={idx}
+                className={`${styles.item}`}
+                style={{ top: topList[idx], visibility: topList[idx + 1] !== void(0) ? 'visible' : 'hidden' }}
+              >
+                {i.content}
+              </div>
+            );
+          }
+          return false;
+        })
+      }
+      <CountDom list={list} current={current} />
+      <BottomDiv end={end} list={list} />
+    </div>
+  );
+};
+
+export default DynamicHeightVirtual;
+
+```
+
+
+```ts
+// 每页请求的数量
+const PAGESIZE:number = 1000;
+// 缓冲地带的dom数量
+const BUFFER_NUMBER:number = 10;
+// 容器高度
+const CONTAINER_HEIGHR:number = 500;
+```
+
+先声明3个常量，意义见注释。
+
+```ts
+// 总的列表数据
+  const [list, setList] = useState<listType>([]);
+  // 当前的页数
+  const [current, setCurrent] = useState<number>(1);
+  // 是否正在请求数据
+  const [loading, setLoading] = useState<boolean>(false);
+  // 接口返回的total，表示总条数
+  const [total, setTotal] = useState<number>(0);
+  // 判断是否以及请求完所有数据
+  const end = useMemo(() => list.length === total, [list, total]);
+  // 滚动容器dom
+  const dom = useRef<HTMLDivElement>();
+  // 每个dom的position距离top的位置
+  const [topList, setTopList] = useState<Array<number>>([0]);
+  // 渲染起始位置
+  const [renderStart, setRenderStart] = useState(0);
+```
+组件声明的一些变量，意义见注释。
+
+```ts
+  const getPage = (num: number) => {
+    setLoading(true);
+    axios.post('/getHi', { pageNum: num, pageSize: PAGESIZE }).then(res => {
+      setList([...list, ...res.data.list]);
+      setTotal(res.data.total);
+      setLoading(false);
+      // 放在异步队列，获取更新之后的dom，然后计算的dom真实高度，维护一组高度的列表
+      setTimeout(() => {
+        const doms = [...dom.current.querySelectorAll('.item')] as Array<HTMLDivElement>;
+        const heights = doms.map(i => {
+          return i.offsetHeight;
+        });
+        
+        const newTopList = [...topList];
+        const topListLength = newTopList.length;
+        for (let i = 0; i < heights.length; i++) {
+          newTopList[topListLength + i] = newTopList[topListLength - 1 + i] + heights[i];
+        }
+        setTopList(newTopList);
+        doms.forEach(i => i.remove());
+      });
+    });
+  };
+```
+这段请求函数，是核心代码。
+
+1、在数据返回之后，我们保存数据到list
+```js
+setList([...list, ...res.data.list]);
+```
+2、此时我们看\<CountDom />
+```jsx
+const CountDom = useMemo(() => {
+  return function _(props: CountDomProps) {
+    const { current, list } = props;
+    const start = (current - 1) * PAGESIZE;
+    return (
+      <div>
+        {
+          list.map((i, idx) =>{
+            if (idx >= start) {
+              return (
+                <div
+                  key={idx}
+                  className={`${styles.item} item`}
+                >
+                  {i.content}
+                </div>
+              );
+            }
+            return false;
+          })
+        }
+      </div>
+    );
+  };
+}, [list, current]);
+--------------------------------------------
+<CountDom list={list} current={current} />
+```
+
+通过const start = (current - 1) * PAGESIZE。我们可以把最后一次请求回来的数据，渲染到\<CountDom />里面。
+
+```ts
+setTimeout(() => {
+  const doms = [...dom.current.querySelectorAll('.item')] as Array<HTMLDivElement>;
+  const heights = doms.map(i => {
+    return i.offsetHeight;
+  });
+  
+  const newTopList = [...topList];
+  const topListLength = newTopList.length;
+  for (let i = 0; i < heights.length; i++) {
+    newTopList[topListLength + i] = newTopList[topListLength - 1 + i] + heights[i];
+  }
+  setTopList(newTopList);
+  doms.forEach(i => i.remove());
+});
+```
+
+放在setTimeout里面，是为了等待list渲染完毕，获取到dom。因为我们第一个元素的position必定是0，所有我们topList默认第一位是0：[0]，然后第二位才是我们累加的开始。第i位的值是 i-1 位的值加上height[i]。  
+获取newTopList之后，
+然后我们设置setTopList(newTopList)，然后把临时dom删除。（topList更新之后，元素就会定位到对应的位置）
+
+
+**滚动事件**
+
+```ts
+const scroll: React.UIEventHandler<HTMLDivElement> = (e) => {
+  const scrollTop = e.currentTarget.scrollTop;
+  // 获取到起始渲染的下标。
+  setRenderStart(topList.findIndex(i => i > scrollTop));
+  // 距离底部的距离
+  const bottomDis = e.currentTarget.scrollHeight - scrollTop - e.currentTarget.offsetHeight;
+  // 设置条件，避免重复赋值
+  if (bottomDis < 50 && !loading && !end) {
+    setCurrent(current + 1);
+  }
+};
+```
+
+
+**再讲一些细节：**
+
+```html
+<div
+  className={styles.root}
+  style={{ height: `${CONTAINER_HEIGHR}px` }}
+  onScroll={scroll}
+  ref={dom}
+>
+  <div style={{ height: `${topList[topList.length - 1]}px` }} />
+  {
+    list.map((i, idx) => {
+      if (idx >= renderStart - BUFFER_NUMBER && idx < renderStart + 20) {
+        return (
+          <div
+            key={idx}
+            className={`${styles.item}`}
+            style={{ top: topList[idx], visibility: topList[idx + 1] !== void(0) ? 'visible' : 'hidden' }}
+          >
+            {i.content}
+          </div>
+        );
+      }
+      return false;
+    })
+  }
+  <CountDom list={list} current={current} />
+  <BottomDiv end={end} list={list} />
+</div>
+```
+
+1、生成滚动条的占位元素，其高度是topList的最后一位。
+2、因为一开始渲染接口数据的时候，其top数据还是空的，导致最新的元素会处在顶部。所以一开始我们把新的元素设置为hidden。当top数据出现时，才把它设置为visible。

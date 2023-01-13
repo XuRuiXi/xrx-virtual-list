@@ -1,0 +1,29 @@
+.root{
+  --bottomHeight: 50px;
+  :global{
+    .item{
+      visibility: hidden;
+      top: 0;
+    }
+  }
+
+  font-family: YouSheBiaoTiHei;
+  margin: 0 auto;
+  overflow-y: auto;
+  position: relative;
+  .item{
+    position: absolute;
+    width: 100%;
+    padding: 10px;
+    text-align: center;
+    word-break: break-all;
+    border-bottom: 1px solid #ddd;
+    text-align: center;
+    box-sizing: border-box;
+  }
+  .bottom{
+    height: var(--bottomHeight);
+    text-align: center;
+    line-height: var(--bottomHeight);
+  }
+}
